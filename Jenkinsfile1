@@ -1,0 +1,98 @@
+pipeline {
+    agent any
+    tools {
+        jdk "jdk17"
+        nodejs "node23"
+    }
+    environment {
+        SCANNER_PATH = tool "sonar-scanner"
+        DOCKER_IMAGE_TAG = "v${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage("Git Checkout") {
+            steps {
+                git branch: 'master', url: 'https://github.com/Neeraj-2806/Devops_Zomato.git'
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''
+                    $SCANNER_PATH/bin/sonar-scanner -Dsonar.projectName=zomato \
+                    -Dsonar.projectKey=zomato
+                    '''
+                }
+            }
+        }
+        stage('Quality Gate Analysis') {
+            steps {
+                waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+            }
+        }
+        stage("Install Dependencies") {
+            steps {
+                sh "npm install"
+            }
+        }
+        stage("Trivy File Scan") {
+            steps {
+                sh 'trivy fs . --format table > trivyfs.txt'
+                sh 'cat trivyfs.txt'
+            }
+        }
+        stage("Building Image") {
+            steps {
+                sh "docker build -t zomato:${DOCKER_IMAGE_TAG} ."
+            }
+        }
+        stage("Pushing to Docker Hub") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh """
+                        echo "Tagging Docker image"
+                        docker tag zomato:${DOCKER_IMAGE_TAG} neeraj2806/zomato:${DOCKER_IMAGE_TAG}
+                        echo "Pushing to Docker Hub"
+                        docker push neeraj2806/zomato:${DOCKER_IMAGE_TAG}
+                        """
+                    }
+                    // Removing the Docker image after pushing
+                    sh """
+                    echo "Removing local Docker image"
+                    docker rmi neeraj2806/zomato:${DOCKER_IMAGE_TAG}
+                    docker rmi zomato:${DOCKER_IMAGE_TAG}
+                    """
+                }
+            }
+        }
+        stage("Running the Container") {
+            steps {
+                sh "docker stop zomato-ctr || true"
+                sh "docker rm zomato-ctr || true"
+                sh "docker run -d --name zomato-ctr -p 3001:3000 neeraj2806/zomato:${DOCKER_IMAGE_TAG}"
+            }
+        }
+        stage("Update Deployment File and Push to GitHub") {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-login', passwordVariable: 'PAT', usernameVariable: 'GIT_USERNAME')]) {
+                    sh """
+                    echo "Updating Docker image in deployment.yaml with tag ${DOCKER_IMAGE_TAG}"
+                    sed -i "s|image: .*|image: neeraj2806/zomato:${DOCKER_IMAGE_TAG}|" Kubernetes/deployment.yaml
+                    git config --global user.email "neeraj@example.com"
+                    git config --global user.name "Neeraj"
+                    git add -A
+                    git commit -m "Updated Docker image to neeraj2806/zomato:${DOCKER_IMAGE_TAG}"
+                    git push https://$GIT_USERNAME:$PAT@github.com/Neeraj-2806/Devops_Zomato.git HEAD:main
+
+                    """
+                }
+            }
+        }
+    }
+}
